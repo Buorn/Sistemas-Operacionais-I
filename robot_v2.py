@@ -7,6 +7,7 @@ import tty  # NOVO: usado com termios
 import threading  # NOVO: para rodar o input do jogador em paralelo
 import shared_v2
 
+# TO DO: criar função que será o target do processo. Essa função vai utilizar a clasze Robot
 """
 Classe básica para representar um robô no jogo.
 Cada robô tem:
