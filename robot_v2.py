@@ -24,7 +24,7 @@ class Robot:
     def __init__(self, id, grid, grid_mutex):
         self.id = id
         self.strength = random.randint(1, 10)
-        self.energy = random.randint(10, 100)
+        self.energy = 100
         self.speed = random.randint(1, 5)
         self.position = self.get_initial_position()
         self.status = 1
