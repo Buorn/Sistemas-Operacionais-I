@@ -1,3 +1,4 @@
+import multiprocessing
 import time
 import random
 import os  # NOVO: necessário para gravar os arquivos de log
@@ -5,11 +6,11 @@ import sys  # NOVO: para capturar entrada de teclado do jogador
 import termios  # NOVO: para leitura não bloqueante do teclado
 import tty  # NOVO: usado com termios
 import threading  # NOVO: para rodar o input do jogador em paralelo
-import shared_v2
+import ctypes
 
-# TO DO: criar função que será o target do processo. Essa função vai utilizar a clasze Robot
-"""
-Classe básica para representar um robô no jogo.
+""""
+Estrutura de dados para representar um robô no jogo.
+Utiliza ctypes para garantir compatibilidade com C e facilitar a manipulação de dados entre processos.
 Cada robô tem:
     - ID
     - força (1-10)
@@ -17,18 +18,46 @@ Cada robô tem:
     - velocidade (1-5)
     - posição
     - status (1 = vivo, 0 = morto)
-    - arquivo de log
-    - threads de tomada de decisão (movimento, coleta, duelo) e housekeeping
+    - arquivo de log para registrar ações
 """
-class Robot:
-    def __init__(self, id, grid, grid_mutex):
-        self.id = id
+class RobotStruct(ctypes.Structure):
+    _fields_ = [
+        ("id", ctypes.c_char),
+        ("strength", ctypes.c_int),
+        ("energy", ctypes.c_int),
+        ("speed", ctypes.c_int),
+        ("x", ctypes.c_int),
+        ("y", ctypes.c_int),
+        ("status", ctypes.c_int),  # e.g. 1 = alive, 0 = dead
+    ]
+
+"""
+Classe básica para representar um robô no jogo.
+A classe inclui métodos para:
+    - iniciar o robô e as threads para tomada de decisão e housekeeping
+    - obter a posição inicial
+    - mover o robô
+    - batalhar com outro robô
+    - recarregar energia
+    - obter e definir posição
+"""
+class Robot(Process):
+    def __init__(self, robotStruct, grid_mutex):
+        super().__init__()
+        self.robotStruct = robotStruct
+        self.id = robotStruct.id.decode()  # Nome do robô
         self.strength = random.randint(1, 10)
-        self.energy = 100
-        self.speed = random.randint(1, 5)
+        self.energy = random.randint(10, 100)
+        self.speed = random.randint(1, 5) * 0.2
         self.position = self.get_initial_position()
         self.status = 1
         self.log_file = f"log_{self.id}.txt"
+        
+    def run(self):
+        """
+        Método principal que inicia o robô e é utilizado como target do processo.
+        Inicializa o grid, se for o primeiro a executar, e inicia as threads de tomada de decisão e housekeeping.
+        """
         self.sense_act_thread = threading.Thread(target=self.sense_act, args=(grid,))
         self.housekeeping_thread = threading.Thread(target=self.housekeeping, args=(grid,))
 
@@ -71,8 +100,6 @@ class Robot:
                     # Move o robô para a nova posição
                     self.position = (new_x, new_y)
                     grid[self.position[1] * GRID_WIDTH + self.position[0]] = b' '
-
-            
             
     """
     Método de duelo: realiza uma batalha entre dois robôs.
