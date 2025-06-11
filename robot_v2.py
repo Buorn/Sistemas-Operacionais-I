@@ -56,6 +56,7 @@ class Robot():
         
     def run(self):
         """
+        TO DO: esse método será implementado na classe RobotProcess
         Método principal que inicia o robô e é utilizado como target do processo.
         Inicializa o grid, se for o primeiro a executar, e inicia as threads de tomada de decisão e housekeeping.
         """
