@@ -41,8 +41,9 @@ A classe inclui métodos para:
     - recarregar energia
     - obter e definir posição
 """
-class Robot(Process):
-    def __init__(self, robotStruct, grid_mutex):
+# TO DO: a classe Robot vai implementar a lógica comportamental do robô. Deve ser criada uma classe RobotProcess (subclasse de Process) que fará a gestão do processo do robô
+class Robot():
+    def __init__(self, robotStruct: RobotStruct, grid_mutex):
         super().__init__()
         self.robotStruct = robotStruct
         self.id = robotStruct.id.decode()  # Nome do robô
