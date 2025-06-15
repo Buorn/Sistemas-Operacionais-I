@@ -1,23 +1,67 @@
 import multiprocessing
-import time
-import random
-import os  # NOVO: necessário para gravar os arquivos de log
-import sys  # NOVO: para capturar entrada de teclado do jogador
-import termios  # NOVO: para leitura não bloqueante do teclado
-import tty  # NOVO: usado com termios
-import threading  # NOVO: para rodar o input do jogador em paralelo
+import threading
 import ctypes
+import random
+import time
+import sys
+import termios
+import tty
+import os
+
+# Definição das constantes
+# Dimensões do tabuleiro
+GRID_WIDTH = 40
+GRID_HEIGHT = 20
+
+# Energia máxima que um robô pode ter e valor da bateria
+MAX_ENERGY = 100
+BATTERY_VALUE = 20
+
+# Número total de robôs na arena
+NUM_ROBOTS = 4
+
+# Número de baterias a serem colocadas no grid
+NUM_BATTERIES = 5
+
+# Número de barreiras fixas a serem colocadas no grid
+NUM_BARRIERS = 30
+
+# Número de casas visíveis para o robô
+VISIBILITY = 10
+
+# Função para encontrar célula vazia no grid. Utilizada na inicialização dos robôs
+def find_empty_cell(grid):
+    while True:
+        #print("find_empty_cell WHILE 1")
+        #time.sleep(0.3)
+        x = random.randint(0, GRID_HEIGHT - 1)
+        y = random.randint(0, GRID_WIDTH - 1)
+
+        #print("find_empty_cell WHILE 2")
+        # Verifica se a célula está vazia
+        if grid[x][y] == b' ':
+            print("find_empty_cell IF")
+            time.sleep(1)
+            return (x, y)
+
+# Memória compartilhada para as flags
+class Flags(ctypes.Structure):
+    _fields_ = [
+        ("init_done", ctypes.c_bool),
+        ("game_over", ctypes.c_int),
+        ("winner", ctypes.c_char),
+    ]
 
 """"
 Estrutura de dados para representar um robô no jogo.
-Utiliza ctypes para garantir compatibilidade com C e facilitar a manipulação de dados entre processos.
+Utiliza ctypes para garantir a manipulação de dados entre processos.
 Cada robô tem:
     - ID
     - força (1-10)
     - energia (10-100)
     - velocidade (1-5)
-    - posição
-    - status (1 = vivo, 0 = morto)
+    - posição (x, y)
+    - status (True = vivo, False = morto)
     - arquivo de log para registrar ações
 """
 class RobotStruct(ctypes.Structure):
@@ -28,7 +72,7 @@ class RobotStruct(ctypes.Structure):
         ("speed", ctypes.c_int),
         ("x", ctypes.c_int),
         ("y", ctypes.c_int),
-        ("status", ctypes.c_int),  # e.g. 1 = alive, 0 = dead
+        ("status", ctypes.c_bool),
     ]
 
 """
@@ -41,134 +85,225 @@ A classe inclui métodos para:
     - recarregar energia
     - obter e definir posição
 """
-# TO DO: a classe Robot vai implementar a lógica comportamental do robô. Deve ser criada uma classe RobotProcess (subclasse de Process) que fará a gestão do processo do robô
 class Robot():
-    def __init__(self, robotStruct: RobotStruct, grid_mutex):
-        super().__init__()
+    def __init__(self, id, grid, robots_array, flags, robotStruct: RobotStruct, grid_mutex, robots_mutex, flags_mutex):
+        self.id = id
+        self.grid = grid
+        self.robots_array = robots_array
+        self.flags = flags
         self.robotStruct = robotStruct
-        self.id = robotStruct.id.decode()  # Nome do robô
-        self.strength = random.randint(1, 10)
-        self.energy = random.randint(10, 100)
-        self.speed = random.randint(1, 5) * 0.2
-        self.position = self.get_initial_position()
-        self.status = 1
-        self.log_file = f"log_{self.id}.txt"
+        self.grid_mutex = grid_mutex
+        self.robots_mutex = robots_mutex
+        self.flags_mutex = flags_mutex
+
+    # Método para identificação de baterias e robôs no grid
+    def sense(self):
+        #print(f"SENSE Robô {self.robotStruct.id.decode()} - ({self.robotStruct.x},{self.robotStruct.y})")
+        #time.sleep(2)
+        x_robot = self.robotStruct.x
+        y_robot = self.robotStruct.y
+
+        # Define os limites da visão do robô
+        left = x_robot - VISIBILITY if x_robot - VISIBILITY > 0 else 0
+        right = x_robot + VISIBILITY if x_robot + VISIBILITY < GRID_WIDTH else GRID_WIDTH
+        top = y_robot - VISIBILITY if y_robot - VISIBILITY > 0 else 0
+        bottom = y_robot + VISIBILITY if y_robot + VISIBILITY < GRID_HEIGHT else GRID_HEIGHT
+
+        # Armazena baterias e robôs por perto
+        btrs = []
+        rbts = []
+
+        # Percorre a visão do robô
+        for row in range(top, bottom):
+            for col in range(left, right):
+                if self.grid[row * GRID_WIDTH + col] == b'&': # Bateria
+                    btrs.append((row, col))
+
+                elif 65 <= ord(self.grid[row * GRID_WIDTH + col]) <= 90 and ord(self.grid[row * GRID_WIDTH + col]) != self.id: # Robô
+                    rbts.append((row, col))
+
+        # Ordena as listas de baterias e robôs por distância
+        btrs.sort(key=lambda x: (x[0] - x_robot) ** 2 + (x[1] - y_robot) ** 2)
+        rbts.sort(key=lambda x: (x[0] - x_robot) ** 2 + (x[1] - y_robot) ** 2)
+
+        #print(f"Robô {self.robotStruct.id.decode()}, ({x_robot},{y_robot}) - Baterias: {btrs}, Robôs: {rbts}")
+        #time.sleep(10)
+
+        return btrs, rbts
+
+    # Método para tomada de decisão e ação do robô
+    def act(self, btrs, rbts):
+        x_robot = self.robotStruct.x
+        y_robot = self.robotStruct.y
+
+        # Prioridade para baterias, depois para robôs. Se não houver, movimento aleatório.
+        target = btrs[0] if btrs else (rbts[0] if rbts else random.choice([(0, 1), (1, 0), (0, -1), (-1, 0)]))
+
+        # Movimento para o alvo
+        dx = target[0] - x_robot
+        dy = target[1] - y_robot
+
+        # Movimento unitário
+        move_x = 0 if dx == 0 else (1 if dx > 0 else -1)
+        move_y = 0 if dy == 0 else (1 if dy > 0 else -1)
+
+        # Escolhe direção para andar para não fazer movimentos diagonais
+        choice = random.choice([0, 1])
+
+        if choice == 0: # Escolhe mover na direção de x
+            new_x = x_robot + move_x
+            new_y = y_robot
+
+        else: # Escolhe mover na direção de y
+            new_x = x_robot
+            new_y = y_robot + move_y
+
+        # Faz a movimentação do robô e toma ação
         
-    def run(self):
-        """
-        TO DO: esse método será implementado na classe RobotProcess
-        Método principal que inicia o robô e é utilizado como target do processo.
-        Inicializa o grid, se for o primeiro a executar, e inicia as threads de tomada de decisão e housekeeping.
-        """
-        self.sense_act_thread = threading.Thread(target=self.sense_act, args=(grid,))
-        self.housekeeping_thread = threading.Thread(target=self.housekeeping, args=(grid,))
+        while self.robotStruct.energy > 0 and self.flags.game_over:
+            #print(f"ACT Robô {self.robotStruct.id.decode()} - ({self.robotStruct.x},{self.robotStruct.y}) - Target: {target}")
+            #time.sleep(1)
+            #print("Loop ACT")
+            #time.sleep(1)
+            time.sleep(0.2 * self.robotStruct.speed)
+            with self.grid_mutex:
+                if self.grid[new_x * GRID_WIDTH + new_y] == b' ': # Movimento para posição vazia
+                    
 
-    """
-    Método auxiliar para obter a posição inicial do robô.
-    Garante que a posição inicial não seja uma barreira ou ocupada por outro robô.
-    """
-    def get_initial_position(self, grid, grid_mutex):
-        while True:
-            x = random.randint(0, GRID_WIDTH - 1)
-            y = random.randint(0, GRID_HEIGHT - 1)
-            
-            if grid[x][y] == b' ':
-                return (x, y)
+                    self.grid[x_robot * GRID_WIDTH + y_robot] = b' '
+                    self.grid[new_x * GRID_WIDTH + new_y] = self.robotStruct.id
 
-    """
-    Método auxiliar para registrar ações do robô em arquivo.
-    Registra a mensagem com o horário atual.
-    """
-    def log(robot, message):
-    with open(robot.log_file, "a") as f:
-        f.write(f"[{time.strftime('%H:%M:%S')}] {message}\n")  # grava mensagem com horário
+                    #print(f"Robô {self.robotStruct.id.decode()} movimentando de ({x_robot},{y_robot}) para vazia ({new_x},{new_y})")
+                    #time.sleep(1)
 
-    """
-    Método de movimento: escolhe um passo aleatório e move o robô na grade.
-    """
-    def move(self):
-        # Escolhe um passo e uma direção aleatórias
-        step = random.randint(1,self.speed)
-        direction = random.choice()
-        
-        while step[0] > 0 or step[1] > 0:
-            new_x = self.position[0] + step[0]
-            new_y = self.position[1] + step[1]
+                    # Atualiza a posição do robô
+                    with self.robots_mutex:
+                        self.robotStruct.x = new_x
+                        self.robotStruct.y = new_y
+                        self.robotStruct.energy -= 1
 
-            # Verifica se a nova posição está dentro dos limites da grade
-            if 0 <= new_x < GRID_WIDTH and 0 <= new_y < GRID_HEIGHT:
-                # Verifica se a nova posição não é uma barreira
-                if grid[new_y * GRID_WIDTH + new_x] != b'#':
-                    # Move o robô para a nova posição
-                    self.position = (new_x, new_y)
-                    grid[self.position[1] * GRID_WIDTH + self.position[0]] = b' '
-            
+                        # Verifica se a energia do robô chegou a zero
+                        if self.robotStruct.energy == 0:
+                            self.grid[x_robot * GRID_WIDTH + y_robot] = b' '
+                            self.status = False
+                            with self.flags_mutex:
+                                self.flags.game_over -= 1
+
+                    return
+
+                elif self.grid[new_x * GRID_WIDTH + new_y] == b'&':
+                    # Recarrega a energia do robô
+                    self.recharge(BATTERY_VALUE)
+                    self.grid[x_robot * GRID_WIDTH + y_robot] = b' '
+                    self.grid[new_x * GRID_WIDTH + new_y] = self.robotStruct.id
+                    
+                    return
+
+                elif 65 <= ord(self.grid[new_x * GRID_WIDTH + new_y]) <= 90:
+                    # Realiza o duelo com o robô adversário
+                    with self.robots_mutex:
+                        print(f"Robô {self.robotStruct.id.decode()} duela com {self.grid[new_x * GRID_WIDTH + new_x].decode()}")
+                        time.sleep(3)
+                        self.battle(self.grid[new_x * GRID_WIDTH + new_x])
+
+                        # Verifica se a energia do robô chegou a zero
+                        if self.robotStruct.energy == 0:
+                            self.status = False
+                            with self.flags_mutex:
+                                self.flags.game_over -= 1
+
+                    return
+
+                elif self.grid[new_x * GRID_WIDTH + new_y] == b'#':
+                    # Movimento aleatório em caso de barreira
+                    move_x, move_y = random.choice([(0, 1), (1, 0), (0, -1), (-1, 0)])
+                    new_x = x_robot + move_x
+                    new_y = y_robot + move_y
+                    continue
+
+                else:
+                    return
+
     """
     Método de duelo: realiza uma batalha entre dois robôs.
     """
-    def battle(self, other_robot):
-        self.log(f"{self.id} iniciou batalha com {other_robot.id}.\n")
-        other_robot.log(f"{self.id} desafiou {other_robot.id} para uma batalha.\n")
-
+    def battle(self, other_robot_id):
+        # Obtém o robô adversário
+        other_robot = self.robots_array[ord(other_robot_id) - 65]
+          
         # Calcula o poder de ataque de cada robô
-        power_self = 2 * self.strength + self.energy
-        power_other = 2 * other_robot.strength + other_robot.energy
+        power_self = 2 * self.robotStruct.strength + self.robotStruct.energy
+        power_other = 2 * other_robot.robotStruct.strength + other_robot.robotStruct.energy
 
         if power_self > power_other:
             # Se robô que chamou o método vencer, muda o status do outro robô para "morto"
-            self.log(f"{self.id} venceu a batalha contra {other_robot.id}")
-            other_robot.log(f"{other_robot.id} perdeu a batalha contra {self.id}")
-            other_robot.status = 0
+            other_robot.status = False
+            self.grid[x_robot * GRID_WIDTH + y_robot] = b' '
+            self.grid[other_robot.robotStruct.x * GRID_WIDTH + other_robot.robotStruct.y] = self.robotStruct.id
+            self.robotStruct.x = other_robot.robotStruct.x
+            self.robotStruct.y = other_robot.robotStruct.y
+            self.robotStruct.energy -= 1
+            
+            with self.flags_mutex:
+                self.flags.game_over -= 1
+                if self.flags.game_over == 0:
+                    self.flags.winner = self.robotStruct.id
 
         elif power_self < power_other:
             # Se robô que chamou o método perder, muda o próprio status para "morto"
-            self.log(f"{self.id} perdeu a batalha contra {other_robot.id}")
-            other_robot.log(f"{other_robot.id} venceu a batalha contra {self.id}")
-            self.status = 0
+            self.status = False
+            self.grid[x_robot * GRID_WIDTH + y_robot] = b' '
+            self.grid[self.robotStruct.x * GRID_WIDTH + self.robotStruct.y] = other_robot.robotStruct.id
+            other_robot.robotStruct.x = self.robotStruct.x
+            other_robot.robotStruct.y = self.robotStruct.y
+            other_robot.robotStruct.energy -= 1
+            
+            with self.flags_mutex:
+                self.flags.game_over -= 1
+                if self.flags.game_over == 0:
+                    self.flags.winner = other_robot.robotStruct.id
 
         else:
             # Em caso de empate, ambos os robôs mudam o status para "morto"
-            self.status = 0
-            self.log(f"{self.id} e {other_robot.id} empataram na batalha. Ambos foram destruídos.\n")
-            other_robot.status = 0
-            other_robot.log(f"{other_robot.id} e {self.id} empataram na batalha. Ambos foram destruídos.\n")
+            self.status = False
+            self.grid[self.robotStruct.x * GRID_WIDTH + self.robotStruct.y] = b' '
+            
+            other_robot.status = False
+            self.grid[other_robot.robotStruct.x * GRID_WIDTH + other_robot.robotStruct.y] = b' '
+            
+            with self.flags_mutex:
+                self.flags.game_over -= 2
+                if self.flags.game_over == 0:
+                    self.flags.winner = b' '
+                    return
     
     """
     Método de recarga: recarrega a energia do robô.
     Se a energia ultrapassar 100, é ajustada para 100.
     """
     def recharge(self, amount):
-        self.energy += amount
-        if self.energy > 100:
-            self.energy = 100
-        self.log(f"{self.id} recarregou sua energia. Energia atual: {self.energy}\n")
-    
-    def get_position(self):
-        return self.position
-    
-    def set_position(self, x, y):
-        self.position = (x, y)
-        self.log(f"{self.id} se moveu para a posição {self.position}")
-        self.log(f"Robô {self.id} iniciado com energia máxima")
-        pos = self.get_position()
-        if pos is None:
-            self.log("Erro: posição inicial não encontrada. Encerrando.")
-            return
-        self.sense_act_thread.start()
-        self.housekeeping_thread.start()
-        self.log(f"Robô {self.id} iniciado com energia máxima")
+        self.robotStruct.energy += amount
+        if self.robotStruct.energy >= MAX_ENERGY:
+            self.robotStruct.energy = MAX_ENERGY
 
-    def sense_act(self, grid)
+    """
+    Método auxiliar para registrar ações do robô em arquivo.
+    Registra a mensagem com o horário atual.
+    """
+    #def log(self, robot, message):
+    #with open(robot.log_file, "a") as f:
+        #f.write(f"[{time.strftime('%H:%M:%S')}] {message}\n")  # grava mensagem com horário
 
-    def housekeeping(self, grid)
+
 
 """
 Classe derivada de Robot para representar um robô controlado por um jogador.
 Além das funcionalidades básicas de um robô, ela inclui a capacidade de receber entradas do teclado para controlar o robô.
 """
+"""
 class PlayerRobot(Robot):
-    def __init__(self, id):
-        super().__init__()
+    def __init__(self, id, grid, robots_array, robotStruct: RobotStruct, grid_mutex, robots_mutex, flags_mutex):
+        super().__init__(id, grid, robots_array, robotStruct, grid_mutex, robots_mutex, flags_mutex)
         self.input_thread = threading.Thread(target=self.get_input)
 
     def get_input(self):
@@ -183,3 +318,183 @@ class PlayerRobot(Robot):
             else:
                 self.log(f"Tecla desconhecida pressionada: {key}")
             time.sleep(0.1)
+"""
+
+"""
+Classe para gerenciar o processo de um robô.
+Inclui a lógica de inicialização e execução do robô.
+"""
+class RobotProcess(multiprocessing.Process):
+    def __init__(self, id, grid, robots_array, flags, grid_mutex, robots_mutex, flags_mutex):
+        super().__init__()
+        self.id = id
+        self.grid = grid
+        self.robots_array = robots_array
+        self.flags = flags
+        self.robot = Robot(chr(id+65), grid, robots_array, flags, robots_array[id], grid_mutex, robots_mutex, flags_mutex)
+        self.grid_mutex = grid_mutex
+        self.robots_mutex = robots_mutex
+        self.flags_mutex = flags_mutex
+        self.log_file = f"log_{self.robot.id}.txt"
+
+    """
+    Método principal que inicia o robô e é utilizado como target do processo.
+    Inicializa o grid, se for o primeiro a executar, e inicia as threads de tomada de decisão e housekeeping.
+    """
+    def run(self):
+        # Inicializa o grid se for o primeiro robô a executar
+        with self.flags_mutex:
+            if not self.flags.init_done:
+                self.initialization()
+                self.flags.init_done = True
+            
+        # Inicia as threads de tomada de decisão e housekeeping
+        sense_act_thread = threading.Thread(target=self.sense_act)
+        sense_act_thread.start()
+        housekeeping_thread = threading.Thread(target=self.housekeeping)
+        housekeeping_thread.start()
+
+        # Aguarda o término das threads
+        sense_act_thread.join()
+        housekeeping_thread.join()
+
+    # Função para encontrar célula vazia no grid. Utilizada na inicialização dos robôs
+    def find_empty_cell(self):
+        while True:
+            x = random.randint(0, GRID_HEIGHT - 1)
+            y = random.randint(0, GRID_WIDTH - 1)
+
+            #print("find_empty_cell WHILE 2")
+            # Verifica se a célula está vazia
+            if self.grid[x * GRID_WIDTH + y] == b' ':
+                return (x, y)
+
+    """
+    Método de inicialização: realiza a inicialização dos segmentos de memória compartilhada.
+    """
+    def initialization(self):
+        with self.grid_mutex:
+            # Inicializa o grid com espaços vazios
+            for row in range(GRID_HEIGHT):
+                for col in range(GRID_WIDTH):
+                    self.grid[row * GRID_WIDTH + col] = b' '
+                    
+            # Posiciona as barreiras
+            for _ in range(NUM_BARRIERS):
+                while True:
+                    x = random.randint(0, GRID_HEIGHT - 1)
+                    y = random.randint(0, GRID_WIDTH - 1)
+                    if self.grid[x * GRID_WIDTH + y] == b' ':
+                        self.grid[x * GRID_WIDTH + y] = b'#'
+                        break
+
+            # Posiciona as baterias
+            for _ in range(NUM_BATTERIES):
+                while True:
+                    x = random.randint(0, GRID_HEIGHT - 1)
+                    y = random.randint(0, GRID_WIDTH - 1)
+                    if self.grid[x * GRID_WIDTH + y] == b' ':
+                        self.grid[x * GRID_WIDTH + y] = b'&'
+                        break
+
+            # Posiciona os robôs
+            for rbt in range(NUM_ROBOTS):
+                with self.robots_mutex:
+                    self.robots_array[rbt].id = chr(rbt + 65).encode()
+                    self.robots_array[rbt].strength = random.randint(1, 10)
+                    self.robots_array[rbt].energy = random.randint(10, 100)
+                    self.robots_array[rbt].speed = random.randint(1, 5)
+                    self.robots_array[rbt].x, self.robots_array[rbt].y = self.find_empty_cell()
+                    self.grid[self.robots_array[rbt].x * GRID_WIDTH + self.robots_array[rbt].y] = self.robots_array[rbt].id
+                    self.robots_array[rbt].status = True
+
+    """
+    Loop do robô: realiza a tomada de decisão e ação do robô.
+    """
+    def sense_act(self):
+        while self.robot.robotStruct.status and self.flags.game_over > 0:
+            btrs, rbts = self.robot.sense()
+            self.robot.act(btrs, rbts)
+
+    """
+    Método de housekeeping: realiza a manutenção do robô.
+    """
+    def housekeeping(self):
+        while self.robot.robotStruct.status and self.flags.game_over > 0:
+            continue
+
+class ViewerProcess(multiprocessing.Process):
+    def __init__(self, grid, robots_array, flags, refresh_rate=0.2):
+        super().__init__()
+        self.grid = grid
+        self.robots_array = robots_array
+        self.flags = flags
+        self.refresh_rate = refresh_rate
+
+    def run(self):
+        while True:
+            if self.flags.init_done:
+                os.system('cls' if os.name == 'nt' else 'clear')
+                print("=== Arena dos Robôs (Viewer) ===\n")
+                
+                for r in range(GRID_HEIGHT + 2):
+                    if r == 0 or r == GRID_HEIGHT + 1:
+                        print('#' * (GRID_WIDTH + 1))
+                        continue
+                    for c in range(GRID_WIDTH + 2):
+                        if c == 0 or c == GRID_WIDTH + 1:
+                            print('#', end = '')
+                        else:
+                            print(self.grid[(r - 1)  * GRID_WIDTH + (c - 1)].decode(), end = '')
+                    print()
+
+                print()
+                for i in range(NUM_ROBOTS):
+                    print(f"Robô {self.robots_array[i].id.decode()}: Energia = {self.robots_array[i].energy}, Status = {'Vivo' if self.robots_array[i].status else 'Morto'}, Posição = ({self.robots_array[i].x},{self.robots_array[i].y})")
+                print("\nCtrl+C para sair.")
+                time.sleep(self.refresh_rate)
+
+def main():
+    # Flags na memória compartilhada
+    flags = multiprocessing.RawValue(Flags)
+
+    flags.init_done = False
+    flags.game_over = NUM_ROBOTS-1
+    flags.winner=b' '
+
+    # Grid na memória compartilhada
+    gridShared = multiprocessing.RawArray(ctypes.c_char, GRID_WIDTH * GRID_HEIGHT)
+
+    # Memória compartilhada para o array de robôs
+    robots_array = multiprocessing.RawArray(RobotStruct, NUM_ROBOTS)
+    robos = []
+
+    # Criação dos mutexes
+    grid_mutex = multiprocessing.Lock()
+    robots_mutex = multiprocessing.Lock()
+    flags_mutex = multiprocessing.Lock()
+
+    # Cria os processos para os robôs
+    for i in range(NUM_ROBOTS):
+        robot_process = RobotProcess(i, gridShared, robots_array, flags, grid_mutex, robots_mutex, flags_mutex)
+        robot_process.start()
+        robos.append(robot_process)
+
+    # Cria o processo viewer
+    viewer = ViewerProcess(gridShared, robots_array, flags)
+    viewer.start()
+
+    # Aguarda o término dos processos dos robôs
+    for r in range(len(robos)):
+        robos[r].join()
+
+    # Depois que robôs terminam, sinaliza fim pro viewer
+    flags.game_over = 0
+
+    # Espera o viewer terminar
+    viewer.join()
+
+    print("Jogo finalizado.")
+
+if __name__ == "__main__":
+    main()
