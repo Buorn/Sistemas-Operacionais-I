@@ -49,6 +49,11 @@ python3 main.py
 
 Você verá a arena atualizada no terminal a cada 0.1s com o estado atual dos robôs, obstáculos e baterias.
 
+A versão robot_v2.py não está completamente finalizada, mas pode ser executada com:
+```bash
+python3 robot_v2.py
+```
+
 ## ❓ Legenda
 
 - `A`, `B`, `C`, `D` – Robôs ativos
