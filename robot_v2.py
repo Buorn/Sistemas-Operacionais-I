@@ -100,6 +100,7 @@ class Robot():
     def sense(self):
         #print(f"SENSE Robô {self.robotStruct.id.decode()} - ({self.robotStruct.x},{self.robotStruct.y})")
         #time.sleep(2)
+        id = self.robotStruct.id
         x_robot = self.robotStruct.x
         y_robot = self.robotStruct.y
 
@@ -116,25 +117,29 @@ class Robot():
         # Percorre a visão do robô
         for row in range(top, bottom):
             for col in range(left, right):
-                if self.grid[row * GRID_WIDTH + col] == b'&': # Bateria
+                cell = self.grid[row * GRID_WIDTH + col]
+                if cell == b'&': # Bateria
                     btrs.append((row, col))
 
-                elif 65 <= ord(self.grid[row * GRID_WIDTH + col]) <= 90 and ord(self.grid[row * GRID_WIDTH + col]) != self.id: # Robô
-                    rbts.append((row, col))
+                elif 65 <= ord(cell) <= 90 and cell != id: # Robô
+                    rbts.append((row, col, cell.decode()))
 
         # Ordena as listas de baterias e robôs por distância
         btrs.sort(key=lambda x: (x[0] - x_robot) ** 2 + (x[1] - y_robot) ** 2)
         rbts.sort(key=lambda x: (x[0] - x_robot) ** 2 + (x[1] - y_robot) ** 2)
 
-        #print(f"Robô {self.robotStruct.id.decode()}, ({x_robot},{y_robot}) - Baterias: {btrs}, Robôs: {rbts}")
-        #time.sleep(10)
+        print(f"Robô {self.robotStruct.id.decode()}, ({x_robot},{y_robot}) - Baterias: {btrs}, Robôs: {rbts}")
+        time.sleep(1)
 
         return btrs, rbts
 
     # Método para tomada de decisão e ação do robô
     def act(self, btrs, rbts):
+        id = self.robotStruct.id
         x_robot = self.robotStruct.x
         y_robot = self.robotStruct.y
+        energy = self.robotStruct.energy
+        speed = self.robotStruct.speed
 
         # Prioridade para baterias, depois para robôs. Se não houver, movimento aleatório.
         target = btrs[0] if btrs else (rbts[0] if rbts else random.choice([(0, 1), (1, 0), (0, -1), (-1, 0)]))
@@ -152,24 +157,28 @@ class Robot():
 
         if choice == 0: # Escolhe mover na direção de x
             new_x = x_robot + move_x
+            if new_x < 0 or new_x >= GRID_WIDTH: # Verifica se o movimento está dentro dos limites do grid
+                new_x = x_robot
             new_y = y_robot
 
         else: # Escolhe mover na direção de y
             new_x = x_robot
             new_y = y_robot + move_y
-
-        # Faz a movimentação do robô e toma ação
+            if new_y < 0 or new_y >= GRID_HEIGHT: # Verifica se o movimento está dentro dos limites do grid
+                new_y = y_robot
         
-        while self.robotStruct.energy > 0 and self.flags.game_over:
+        # Faz a movimentação do robô e toma ação
+        while energy > 0 and self.flags.game_over:
             #print(f"ACT Robô {self.robotStruct.id.decode()} - ({self.robotStruct.x},{self.robotStruct.y}) - Target: {target}")
             #time.sleep(1)
             #print("Loop ACT")
             #time.sleep(1)
-            time.sleep(0.2 * self.robotStruct.speed)
+            time.sleep(0.2 * speed)
             with self.grid_mutex:
-                if self.grid[new_x * GRID_WIDTH + new_y] == b' ': # Movimento para posição vazia
-                    
-
+                # Obtém o conteúdo da célula do grid da nova posição
+                cell = self.grid[new_x * GRID_WIDTH + new_y]
+                
+                if cell == b' ': # Movimento para posição vazia
                     self.grid[x_robot * GRID_WIDTH + y_robot] = b' '
                     self.grid[new_x * GRID_WIDTH + new_y] = self.robotStruct.id
 
@@ -182,29 +191,29 @@ class Robot():
                         self.robotStruct.y = new_y
                         self.robotStruct.energy -= 1
 
-                        # Verifica se a energia do robô chegou a zero
-                        if self.robotStruct.energy == 0:
-                            self.grid[x_robot * GRID_WIDTH + y_robot] = b' '
-                            self.status = False
-                            with self.flags_mutex:
-                                self.flags.game_over -= 1
+                    # Verifica se a energia do robô chegou a zero
+                    if self.robotStruct.energy == 0:
+                        self.grid[new_x * GRID_WIDTH + new_y] = b' '
+                        self.robotStruct.status = False
+                        with self.flags_mutex:
+                            self.flags.game_over -= 1
 
                     return
 
-                elif self.grid[new_x * GRID_WIDTH + new_y] == b'&':
-                    # Recarrega a energia do robô
-                    self.recharge(BATTERY_VALUE)
+                elif cell == b'&': # Movimento para posição com bateria
+                    print(f"Robô {self.robotStruct.id.decode()} recarregando em ({new_x},{new_y})")
                     self.grid[x_robot * GRID_WIDTH + y_robot] = b' '
                     self.grid[new_x * GRID_WIDTH + new_y] = self.robotStruct.id
+                    self.recharge(BATTERY_VALUE)
                     
                     return
 
-                elif 65 <= ord(self.grid[new_x * GRID_WIDTH + new_y]) <= 90:
+                elif 65 <= ord(cell) <= 90:
                     # Realiza o duelo com o robô adversário
                     with self.robots_mutex:
-                        print(f"Robô {self.robotStruct.id.decode()} duela com {self.grid[new_x * GRID_WIDTH + new_x].decode()}")
-                        time.sleep(3)
-                        self.battle(self.grid[new_x * GRID_WIDTH + new_x])
+                        print(f"Robô {self.robotStruct.id.decode()} duela com {cell.decode()}")
+                        time.sleep(2)
+                        self.battle(cell)
 
                         # Verifica se a energia do robô chegou a zero
                         if self.robotStruct.energy == 0:
@@ -228,20 +237,25 @@ class Robot():
     Método de duelo: realiza uma batalha entre dois robôs.
     """
     def battle(self, other_robot_id):
-        # Obtém o robô adversário
-        other_robot = self.robots_array[ord(other_robot_id) - 65]
-          
-        # Calcula o poder de ataque de cada robô
+        # Obtém dados e calula poder do robô que chamou o método
+        id_self = self.robotStruct.id
+        x_self  = self.robotStruct.x
+        y_self = self.robotStruct.y
         power_self = 2 * self.robotStruct.strength + self.robotStruct.energy
-        power_other = 2 * other_robot.robotStruct.strength + other_robot.robotStruct.energy
+        
+        # Obtém dados e calcula poder do robô adversário
+        id_other = self.robots_array[ord(other_robot_id) - 65].id
+        x_other  = self.robots_array[ord(other_robot_id) - 65].x
+        y_other = self.robots_array[ord(other_robot_id) - 65].y
+        power_other = 2 * self.robots_array[ord(other_robot_id) - 65].strength + self.robots_array[ord(other_robot_id) - 65].energy
 
         if power_self > power_other:
             # Se robô que chamou o método vencer, muda o status do outro robô para "morto"
-            other_robot.status = False
-            self.grid[x_robot * GRID_WIDTH + y_robot] = b' '
-            self.grid[other_robot.robotStruct.x * GRID_WIDTH + other_robot.robotStruct.y] = self.robotStruct.id
-            self.robotStruct.x = other_robot.robotStruct.x
-            self.robotStruct.y = other_robot.robotStruct.y
+            self.robots_array[id_other].status = False
+            self.grid[x_self * GRID_WIDTH + y_self] = b' '
+            self.grid[x_other * GRID_WIDTH + y_other] = self.robotStruct.id
+            self.robotStruct.x = x_other
+            self.robotStruct.y = y_other
             self.robotStruct.energy -= 1
             
             with self.flags_mutex:
@@ -249,42 +263,42 @@ class Robot():
                 if self.flags.game_over == 0:
                     self.flags.winner = self.robotStruct.id
 
+                return
+
         elif power_self < power_other:
             # Se robô que chamou o método perder, muda o próprio status para "morto"
             self.status = False
-            self.grid[x_robot * GRID_WIDTH + y_robot] = b' '
-            self.grid[self.robotStruct.x * GRID_WIDTH + self.robotStruct.y] = other_robot.robotStruct.id
-            other_robot.robotStruct.x = self.robotStruct.x
-            other_robot.robotStruct.y = self.robotStruct.y
-            other_robot.robotStruct.energy -= 1
+            self.grid[x_self * GRID_WIDTH + y_self] = b' '
+            self.robots_array[ord(other_robot_id) - 65].energy -= 1
             
             with self.flags_mutex:
                 self.flags.game_over -= 1
                 if self.flags.game_over == 0:
-                    self.flags.winner = other_robot.robotStruct.id
+                    self.flags.winner = self.robots_array[id_other].id
+
+                return
 
         else:
             # Em caso de empate, ambos os robôs mudam o status para "morto"
             self.status = False
             self.grid[self.robotStruct.x * GRID_WIDTH + self.robotStruct.y] = b' '
             
-            other_robot.status = False
-            self.grid[other_robot.robotStruct.x * GRID_WIDTH + other_robot.robotStruct.y] = b' '
+            self.robots_array[ord(other_robot_id) - 65].status = False
+            self.grid[x_other * GRID_WIDTH + y_other] = b' '
             
             with self.flags_mutex:
                 self.flags.game_over -= 2
                 if self.flags.game_over == 0:
-                    self.flags.winner = b' '
-                    return
+                    self.flags.winner = b'-'
+                    
+                return
     
     """
     Método de recarga: recarrega a energia do robô.
     Se a energia ultrapassar 100, é ajustada para 100.
     """
     def recharge(self, amount):
-        self.robotStruct.energy += amount
-        if self.robotStruct.energy >= MAX_ENERGY:
-            self.robotStruct.energy = MAX_ENERGY
+        self.robotStruct.energy += amount if self.robotStruct.energy <= MAX_ENERGY else MAX_ENERGY
 
     """
     Método auxiliar para registrar ações do robô em arquivo.
